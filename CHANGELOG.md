@@ -6,10 +6,32 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The Hevy webhook on a self-hosted `web/` server syncs merge-first again, as the Python server did. It answers at once, waits 5 minutes, tries up to twice more 10 minutes apart to merge into the watch activity, and uploads a fresh activity only on the last attempt. `WEBHOOK_DELAY_SECONDS`, `WEBHOOK_RETRY_INTERVAL_SECONDS`, `WEBHOOK_MAX_ATTEMPTS` and `WEBHOOK_MAX_INFLIGHT` keep their Python names and defaults. Vercel and the GitHub Actions handoff are unchanged (#656).
+- The web dashboard can be served under a path prefix: `H2G_BASE_PATH`, set at build time, becomes the Next.js `basePath`, and `withBasePath()` prefixes the hand-written `fetch("/api/...")` calls and plain links that Next does not. Unset, the build is unchanged. `web/Dockerfile` takes it as a build argument, and the compose example passes it through. The Python dashboard had this since #305 (#658).
+- `web/Dockerfile` builds the dashboard from its standalone output: multi-stage, runs as the unprivileged `node` user, health check on `/api/version`, amd64 and arm64. `web/docker-compose.example.yml` runs it with Postgres 16 and a small scheduler that calls `GET /api/cron/sync` every two hours (#657).
+
 ### Fixed
 
+- The webhook compares the `CRON_SECRET` bearer in constant time (#656).
+- The README said the cron route is `POST /api/cron/sync`. It is `GET`; a POST answers 405. The Self-hosting section now shows the call and says that `GITHUB_PAT` plus `GITHUB_REPO` send the run to GitHub Actions instead (#657).
 - `init` no longer reports a Garmin login it could not save. It checks the token folder can be written before asking for the password, and says so if the token file did not appear afterwards. In Docker on Linux a host folder that Docker created belongs to root, and the image runs as uid 999, so the login was lost and every later run failed with "No cached tokens" (#651, #653).
 - The Docker section of the README mounts both folders for `init`, recommends named volumes, explains uid 999 for host folders, and tells docker-compose users how to reuse their old volumes (#651, #652).
+
+## [0.11.0 (npm)] - 2026-10-03
+
+### Added
+
+- Engine: `syncOneWorkout` takes `mergeOnly`, and returns `merge_pending` when the merge found no Garmin activity instead of uploading. A `replace` match counts as found. The Python `merge_only` also refused those, so with `watch_strategy=replace` every webhook sync waited for the last attempt (#656).
+- `onWatchActivityDeleted` takes an optional third argument, `{ hevyId, workoutEnd }`, passed from both delete sites, so a hook can key what it records on the workout. A hook written for two arguments keeps working (#655).
+
+## [0.10.0 (npm)] - 2026-10-02
+
+### Added
+
+- `resolveExclusiveMatches` keeps at most one Hevy workout per Garmin activity. `matchHevyToGarmin`'s second pass can hand a workout that has no activity of its own the closest one within six hours, even when the first pass already paired that activity with another workout. The smaller gap between the starts wins, and a tie goes to the lower Hevy id.
+- `HevyClient.updateWorkout(id, body)` replaces a workout on Hevy, with the same retry and auth handling as the reads.
 
 ## [0.12.0] - 2026-09-11
 

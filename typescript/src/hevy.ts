@@ -57,6 +57,33 @@ export class HevyClient {
     return res.json() as Promise<T>;
   }
 
+  /**
+   * Replace a workout on Hevy (PUT /v1/workouts/{id}) with `body`, which is `{ workout: {...} }` in
+   * Hevy's shape. Same handling as a read: 401/403 throws HevyAuthError, 429 and 5xx are retried
+   * with backoff, any other failure throws with the status.
+   */
+  async updateWorkout<T = any>(workoutId: string, body: unknown): Promise<T> {
+    const url = `${this.baseUrl}/workouts/${encodeURIComponent(workoutId)}`;
+    const retryStatus = new Set([429, 500, 502, 503, 504]);
+    let res!: Response;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      res = await this.fetchImpl(url, {
+        method: "PUT",
+        headers: { "api-key": this.key, "Accept": "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (res.status === 401 || res.status === 403) {
+        throw new HevyAuthError("Hevy API key invalid or expired (check Hevy Pro + regenerate at hevy.com/settings).");
+      }
+      if (retryStatus.has(res.status)) { await sleep(this.retryBackoffMs * (attempt + 1)); continue; }
+      break;
+    }
+    if (!res.ok) throw new Error(`Hevy PUT /v1/workouts/${workoutId} → ${res.status}: ${(await res.text().catch(() => "")).slice(0, 200)}`);
+    await sleep(this.callDelayMs);
+    const text = await res.text();
+    return (text ? JSON.parse(text) : {}) as T;
+  }
+
   async getWorkoutCount(): Promise<number> {
     const d = await this.get<{ workout_count?: number }>("/workouts/count");
     return d.workout_count ?? 0;
