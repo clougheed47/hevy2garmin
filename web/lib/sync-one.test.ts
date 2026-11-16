@@ -58,6 +58,13 @@ beforeEach(() => {
 });
 
 describe("syncOneWorkout (route shim)", () => {
+  it("pads the Garmin adapter's date listing for the engine's merge lookup", async () => {
+    const list = vi.fn(async () => []);
+    h.engine.garminGateway.mockReturnValueOnce(Object.assign({ client: {}, kind: "gateway" }, { activitiesByDate: list }));
+    const gateway = await buildSyncDeps(SQL).gateway();
+    await gateway.activitiesByDate("2026-06-15", "2026-06-15");
+    expect(list).toHaveBeenCalledWith("2026-06-14", "2026-06-16");
+  });
   it("never injects a dryRun, and passes the caller's options through", async () => {
     await syncOneWorkout(SQL);
     expect(h.engine.syncOneWorkout).toHaveBeenCalledTimes(1);
@@ -173,6 +180,12 @@ describe("sync start date", () => {
 
   it("keeps everything when no date is set", async () => {
     expect((await fetchWith(null)).map((w) => w.id)).toEqual(["old", "new"]);
+  });
+
+  it("does not limit a resync, whose workout is synced and may be older than the date", async () => {
+    const sql = makeSql({ sync_window: { start_date: "2026-09-01" } }) as never;
+    const deps = buildSyncDeps(sql, { fetchWorkouts: async () => [OLD] as never, targetActivityId: 4242 });
+    expect(((await deps.fetchWorkouts()) as Array<{ id: string }>).map((w) => w.id)).toEqual(["old"]);
   });
 
   it("keeps everything when the stored value is not a date", async () => {

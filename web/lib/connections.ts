@@ -1,4 +1,5 @@
 import type { getDb } from "./db";
+import { ifNoTable } from "./missing-table";
 
 type Sql = ReturnType<typeof getDb>;
 
@@ -35,23 +36,28 @@ export async function loadGarminConnection(sql: Sql): Promise<Connection> {
             OR jsonb_exists(credentials, 'di_token')) AS has_token
     FROM platform_credentials
     WHERE platform = 'garmin_tokens'
-  `.catch(() => [] as Array<{ connected_at: string | null; has_token: boolean | null }>);
+  `.catch(ifNoTable([] as Array<{ connected_at: string | null; has_token: boolean | null }>));
   const row = rows[0];
   if (!row?.has_token) return DISCONNECTED;
   return { connected: true, connectedAt: row.connected_at ?? null };
 }
 
 /**
- * Hevy is connected when its credential row exists and is not explicitly disconnected. The
- * setup form writes status='active', so testing for the literal 'connected' never matches.
+ * Hevy is connected when a key is available and has not been rejected. The key comes from
+ * HEVY_API_KEY or the credential row, in the order the sync resolves it (lib/hevy-sync.ts), so
+ * a deployment that sets the key in its environment is connected without a row. A
+ * row marked 'disconnected' (Hevy rejected the key, #605) wins either way. The setup form
+ * writes status='active', so testing for the literal 'connected' never matches.
  */
 export async function loadHevyConnection(sql: Sql): Promise<Connection> {
+  const fromEnv = Boolean(process.env.HEVY_API_KEY?.trim());
   const rows = await sql`
-    SELECT status, connected_at
+    SELECT status, connected_at, jsonb_exists(credentials, 'api_key') AS has_key
     FROM platform_credentials
     WHERE platform = 'hevy'
-  `.catch(() => [] as Array<{ status: string | null; connected_at: string | null }>);
+  `.catch(ifNoTable([] as Array<{ status: string | null; connected_at: string | null; has_key: boolean | null }>));
   const row = rows[0];
-  if (!row || row.status === "disconnected") return DISCONNECTED;
-  return { connected: true, connectedAt: row.connected_at ?? null };
+  if (row?.status === "disconnected") return DISCONNECTED;
+  if (!fromEnv && !row?.has_key) return DISCONNECTED;
+  return { connected: true, connectedAt: row?.connected_at ?? null };
 }

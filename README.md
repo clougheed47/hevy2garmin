@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="80" height="80" alt="hevy2garmin logo">
+  <img src="docs/images/banner.png" width="100%" alt="hevy2garmin">
 </p>
 
 <h1 align="center">hevy2garmin</h1>
@@ -338,9 +338,13 @@ The compose file starts three containers:
 
 - `db`, Postgres 16, with its data in the `db_data` volume. It is the only state; the web container holds none.
 - `web`, the dashboard on port 8096, bound to `127.0.0.1`. It runs as the unprivileged `node` user, and its health check is `GET /api/version`, which needs neither a session nor the database.
-- `cron`, which calls `GET /api/cron/sync` every two hours (`SYNC_INTERVAL_SECONDS` in `.env` changes it). Without something calling that route, a self-hosted dashboard only syncs when you press **Sync Now** or Hevy sends a webhook.
+- `cron`, which calls `GET /api/cron/sync` every two hours (`SYNC_INTERVAL_SECONDS` in `.env` changes it). Without something calling that route, a self-hosted dashboard only syncs when you press **Sync Now** or Hevy sends a webhook. The `web` service sets `H2G_SERVER_SYNC_SCHEDULE` to match, so the dashboard shows this schedule; change both together.
 
 To run the image without compose, build it with `docker build -t hevy2garmin-web web/` and pass the same variables with `-e`, pointing `DATABASE_URL` at your Postgres. The image builds and runs on amd64 and arm64. Build it on the machine that runs it: an emulated cross-build under QEMU crashes in Next's build step. To have `/api/version` report the commit you built, set `HEVY2GARMIN_COMMIT_SHA` when you start the container.
+
+### Signing in to Garmin without the Worker
+
+The setup page signs in to Garmin through the shared Cloudflare Worker, because Garmin blocks its sign-in from cloud servers. A self-hosted server on a home connection usually is not blocked. Set `H2G_DIRECT_GARMIN_LOGIN=true` and it runs the Worker's own code in its process instead (`garmin-auth/sso-local`): your email, password, two-factor code and a pasted sign-in ticket then go from your server to Garmin and nowhere else, and `GARMIN_LOGIN_WORKER_URL` is ignored. The two-factor step is held in memory between the password and the code, so this needs one long-running process, which the Docker image is; it does not work on serverless. With Docker, add it under the `web` service's `environment`.
 
 ### Under a sub-path
 
@@ -359,6 +363,8 @@ The cron route is `GET /api/cron/sync` with the same bearer. Vercel calls it dai
 ```
 
 Leave `GITHUB_PAT` and `GITHUB_REPO` unset on a self-hosted box. With both set, the route hands the run to the GitHub Actions workflow on your fork instead of syncing on the server.
+
+The dashboard's **Auto-sync** toggle and interval schedule that GitHub Actions workflow, so on a self-hosted box they change nothing. Set `H2G_SERVER_SYNC_SCHEDULE` to how often your scheduler runs, in words (`every 2 hours`): the dashboard and Settings then show that schedule in place of the toggle, the interval and the GitHub token, and **Sync all** says it runs on the server.
 
 ### Removing duplicates from intervals.icu
 
@@ -387,12 +393,16 @@ The paths inside the container are unchanged, so nothing needs moving.
 
 ### Vercel (fork-based deploy)
 
+The dashboard shows a banner when the original repo has changes your version doesn't have yet (set `H2G_UPDATE_CHECK=off` to turn it off). Its **Update now** button does what **Sync fork** does below, and needs the GitHub token saved in Settings.
+
 Your Vercel project is linked to your GitHub fork. To get the latest version:
 
 1. Go to your fork on GitHub (e.g. `github.com/your-username/hevy2garmin`)
 2. Click **Sync fork** → **Update branch** (this pulls the latest changes from the original repo)
 3. Vercel auto-deploys when your fork updates. Wait ~1 minute for the build to finish.
 4. Open your dashboard URL and reconnect Garmin if prompted (token format may change between versions)
+
+**If Sync fork shows "Discard N commits" instead of "Update branch"** (N is a number), your fork was made on or before 9 September 2026. The history of this repository was rewritten that day, so GitHub cannot update older forks the normal way. Click **Discard N commits**. This replaces the code in your fork with the current version. Your Vercel settings, environment variables and database are not in the repository, so they stay as they are. Please do not click **Open pull request**, because that sends a pull request to this repository and does not update your fork. If you changed the code in your fork yourself, please save those changes first, because discarding removes them.
 
 **If you deployed before April 2026** using the old one-click button, your repo may be a standalone copy instead of a fork ("Sync fork" button won't appear). To migrate:
 

@@ -1,9 +1,15 @@
 import { getDb } from "@/lib/db";
-import { WorkoutRow } from "@/components/workout-row";
+import { demoMode } from "@/lib/demo";
+import { demoWorkouts } from "@/lib/demo-data";
+import { WorkoutList } from "@/components/workout-list";
 import { CandidatesList } from "@/components/candidates-list";
 
-// Queries the live hevy2garmin Postgres per request — never at build time.
-export const dynamic = "force-dynamic";
+import { connection } from "next/server";
+
+// Self-hosted, this reads Postgres per request and renders dynamically. The public
+// demo has no database and serves fixed sample data, so it prerenders as a static
+// page. The connection() call in the component forces the dynamic render off the
+// demo; leaving it out in demo mode lets the page be prerendered at build.
 
 interface WorkoutItem {
   hevy_id: string;
@@ -14,6 +20,8 @@ interface WorkoutItem {
   state: string;
   detail: string | null;
   garmin_activity_id: string | null;
+  // Set when a resync rewrote the row; `when` stays the original sync (#709).
+  resynced_at: string | null;
   kind: "terminal" | "pending";
 }
 
@@ -25,6 +33,7 @@ interface WorkoutsData {
 const EMPTY: WorkoutsData = { dbConfigured: false, items: [] };
 
 async function loadWorkouts(): Promise<WorkoutsData> {
+  if (demoMode()) return demoWorkouts();
   let sql: ReturnType<typeof getDb>;
   try {
     sql = getDb();
@@ -34,7 +43,7 @@ async function loadWorkouts(): Promise<WorkoutsData> {
 
   const [terminal, pending] = await Promise.all([
     sql`
-      SELECT hevy_id, title, synced_at, garmin_activity_id,
+      SELECT hevy_id, title, synced_at, resynced_at, garmin_activity_id,
              COALESCE(status, 'success') AS status
       FROM synced_workouts
       ORDER BY synced_at DESC
@@ -45,6 +54,7 @@ async function loadWorkouts(): Promise<WorkoutsData> {
           hevy_id: string;
           title: string | null;
           synced_at: string | null;
+          resynced_at: string | null;
           garmin_activity_id: string | null;
           status: string;
         }>,
@@ -77,6 +87,7 @@ async function loadWorkouts(): Promise<WorkoutsData> {
     state: p.phase ?? "pending",
     detail: p.last_error ?? p.next_step ?? null,
     garmin_activity_id: p.garmin_activity_id ?? null,
+    resynced_at: null,
     kind: "pending",
   }));
 
@@ -92,6 +103,7 @@ async function loadWorkouts(): Promise<WorkoutsData> {
       state: t.status,
       detail: null,
       garmin_activity_id: t.garmin_activity_id ?? null,
+      resynced_at: t.resynced_at ?? null,
       kind: "terminal",
     }));
 
@@ -100,6 +112,7 @@ async function loadWorkouts(): Promise<WorkoutsData> {
 }
 
 export default async function WorkoutsPage() {
+  if (!demoMode()) await connection();
   const data = await loadWorkouts();
 
   return (
@@ -135,11 +148,7 @@ export default async function WorkoutsPage() {
           </p>
         </div>
       ) : (
-        <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface-elevated">
-          {data.items.map((w) => (
-            <WorkoutRow key={w.hevy_id} item={w} />
-          ))}
-        </ul>
+        <WorkoutList items={data.items} />
       )}
     </main>
   );

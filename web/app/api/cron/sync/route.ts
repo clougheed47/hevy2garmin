@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import { syncOneWorkout, type SyncOneResult } from "@/lib/sync-one";
+import { repeatsEarlierRun } from "@/lib/sync-progress";
 import { postgresSyncStore } from "@/lib/sync-store";
 import { recordSyncRun } from "hevy2garmin";
 import { getDb } from "@/lib/db";
+import { demoMode } from "@/lib/demo";
 import { acquireSyncLock } from "hevy2garmin";
 import { postgresLockBackend } from "@/lib/sync-lock-store";
 import { getGithubPat, getGithubRepo, triggerViaActions } from "@/lib/github";
@@ -29,6 +31,12 @@ export async function GET(request: Request) {
   const m = auth.match(/^Bearer\s+(.+)$/i);
   if (!secret || !m || m[1] !== secret) {
     return NextResponse.json({ ok: false, error: "Unauthorized." }, { status: 401 });
+  }
+
+  // The public demo has no database and only placeholder credentials, so there is
+  // nothing to sync. Answer without starting a database or a GitHub Action.
+  if (demoMode()) {
+    return NextResponse.json({ ok: true, mode: "demo", reason: "sync is disabled in demo mode" });
   }
 
   // Deployed path: hand off to the Action so the long browser-auth sync runs off
@@ -66,6 +74,7 @@ export async function GET(request: Request) {
   }
 
   const runs: SyncOneResult[] = [];
+  const seen = new Set<string>();
   try {
     for (let i = 0; i < CAP; i++) {
       // respectGrace: nobody is watching this run, so a workout that just
@@ -73,6 +82,9 @@ export async function GET(request: Request) {
       // becoming a second copy of the same session.
       const r = await syncOneWorkout(sql, { dryRun: false, respectGrace: true });
       if (r.status === "none") break;
+      // A workout already handled in this run came back: it is still pending (deferred), so
+      // nothing more will move until the next run (#723).
+      if (repeatsEarlierRun(seen, r)) break;
       runs.push(r);
       // Only a hard error stops the run. One refused or unresolved workout must
       // not cancel the rest of the backlog, which is how the Python loop

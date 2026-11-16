@@ -1,12 +1,19 @@
 import { getDb } from "@/lib/db";
+import { demoMode } from "@/lib/demo";
+import { demoSetup } from "@/lib/demo-data";
 import { authEnabled, productionRuntime } from "@/lib/auth";
 import { loadGarminConnection, loadHevyConnection, type Connection } from "@/lib/connections";
 import { ConnectHevy } from "@/components/connect-hevy";
 import { ConnectGarmin } from "@/components/connect-garmin";
+import { directGarminLogin } from "@/lib/direct-login-flag";
 import { SetupTimezone } from "@/components/setup-timezone";
 
-// Queries the live hevy2garmin Postgres per request — never at build time.
-export const dynamic = "force-dynamic";
+import { connection } from "next/server";
+
+// Self-hosted, this reads Postgres per request and renders dynamically. The public
+// demo has no database and serves fixed sample data, so it prerenders as a static
+// page. The connection() call in the component forces the dynamic render off the
+// demo; leaving it out in demo mode lets the page be prerendered at build.
 
 interface SetupData {
   dbConfigured: boolean;
@@ -20,6 +27,7 @@ const NONE: Connection = { connected: false, connectedAt: null };
 const EMPTY: SetupData = { dbConfigured: false, hevy: NONE, garmin: NONE, timezone: null };
 
 async function loadSetup(): Promise<SetupData> {
+  if (demoMode()) return demoSetup();
   let sql: ReturnType<typeof getDb>;
   try {
     sql = getDb();
@@ -115,7 +123,11 @@ function SetPasswordFirst() {
 }
 
 export default async function SetupPage() {
-  if (productionRuntime() && !authEnabled()) return <SetPasswordFirst />;
+  if (!demoMode()) await connection();
+  // The public demo is read-only and has no owner to set a password, so it shows
+  // the connected sample here rather than the password prompt, the same choice the
+  // proxy makes for every demo page (#634).
+  if (productionRuntime() && !authEnabled() && !demoMode()) return <SetPasswordFirst />;
   const data = await loadSetup();
   const hevyConnected = data.hevy.connected;
   const garminConnected = data.garmin.connected;
@@ -160,7 +172,7 @@ export default async function SetupPage() {
             Connected {fmtDate(data.garmin.connectedAt)}.
           </p>
         )}
-        <ConnectGarmin connected={garminConnected} />
+        <ConnectGarmin connected={garminConnected} directLogin={directGarminLogin()} />
       </section>
 
       {/* Timezone (#639). Last, because it only matters once something can sync,

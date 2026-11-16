@@ -34,6 +34,7 @@ import { postgresSyncStore } from "./sync-store";
 import { loadSyncSettings, loadSyncStartDate } from "./sync-settings";
 import { parseStartDate, withinSyncWindow } from "./sync-window";
 import type { Sql } from "./pending-store";
+import { withGarminLocalDates } from "./garmin-local-dates";
 
 export type {
   CandidateWorkout,
@@ -64,13 +65,20 @@ export function buildSyncDeps(sql: Sql, options: SyncOneOptions = {}): SyncDeps 
   return {
     store: postgresSyncStore(sql),
     // Built once, lazily: the dry-run/no-candidate paths never log in to Garmin.
-    gateway: () => (gateway ??= clientFactory().then(garminGateway)),
+    gateway: () => (gateway ??= clientFactory().then(garminGateway).then(withGarminLocalDates)),
     fetchWorkouts: async () => {
       const all = await fetchWorkouts();
       // Applied HERE, before the engine sees the list, so listCandidates and
       // syncOneWorkout both honour it without being told and without the engine
       // needing a release (#647).
-      const startDate = parseStartDate(await loadSyncStartDate(sql).catch(() => null));
+      //
+      // Not for a resync. The date chooses which workouts are sync candidates,
+      // and a resync's workout is already synced, possibly before the date was
+      // set. Hiding it would leave the engine nothing to resync from.
+      const startDate =
+        options.targetActivityId != null
+          ? null
+          : parseStartDate(await loadSyncStartDate(sql).catch(() => null));
       const workouts = withinSyncWindow(all, startDate);
       // The HR backup is looked up by id against the FULL list on purpose: a
       // workout outside the window is not a candidate, but one that was synced

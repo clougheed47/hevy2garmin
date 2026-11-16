@@ -1,15 +1,26 @@
 import { getDb } from "@/lib/db";
+import { demoMode } from "@/lib/demo";
+import { demoDashboard } from "@/lib/demo-data";
+import { DatabaseDownPage } from "@/components/database-down";
+import { ifNoTable } from "@/lib/missing-table";
 import { loadGarminConnection, loadHevyConnection } from "@/lib/connections";
 import { SyncPanel } from "@/components/sync-panel";
 import { SyncLoop } from "@/components/sync-loop";
 import { BatchSync } from "@/components/batch-sync";
 import { AutoSyncToggle } from "@/components/autosync-toggle";
+import { ServerSchedule } from "@/components/server-schedule";
+import { serverSyncSchedule } from "@/lib/server-schedule";
 import { PipelineDiagram } from "@/components/pipeline-diagram";
 import { HEVY_TO_GARMIN } from "hevy2garmin";
 import { withBasePath } from "@/lib/base-path";
+import { UpdateBanner } from "@/components/update-banner";
 
-// Queries the live hevy2garmin Postgres per request — never at build time.
-export const dynamic = "force-dynamic";
+import { connection } from "next/server";
+
+// Self-hosted, this reads Postgres per request and renders dynamically. The public
+// demo has no database and serves fixed sample data, so it prerenders as a static
+// page. The connection() call in the component forces the dynamic render off the
+// demo; leaving it out in demo mode lets the page be prerendered at build.
 
 interface RecentWorkout {
   hevy_id: string;
@@ -31,6 +42,8 @@ interface SyncLogEntry {
 }
 
 interface DashboardData {
+  /** The database did not answer, as opposed to answering with nothing (#765). */
+  dbDown?: boolean;
   dbConfigured: boolean;
   hevyConnected: boolean;
   garminConnected: boolean;
@@ -65,6 +78,7 @@ const EMPTY: DashboardData = {
 };
 
 async function loadDashboard(): Promise<DashboardData> {
+  if (demoMode()) return demoDashboard();
   let sql: ReturnType<typeof getDb>;
   try {
     sql = getDb();
@@ -72,88 +86,93 @@ async function loadDashboard(): Promise<DashboardData> {
     return EMPTY;
   }
 
-  // Every query is guarded so a missing/empty table degrades to a sane default
-  // rather than crashing the whole page render.
-  const [hevyConn, garminConn, counts, recent, syncLog, autoSync, pendingRow, routinesRow] = await Promise.all([
-    loadHevyConnection(sql),
-    loadGarminConnection(sql),
-    sql`
-      SELECT
-        count(*) FILTER (WHERE COALESCE(status, 'success') = 'success')::int AS total,
-        count(*) FILTER (
-          WHERE COALESCE(status, 'success') = 'success'
-            AND synced_at >= (now() - interval '7 days')
-        )::int AS week,
-        count(*) FILTER (WHERE status = 'manual')::int AS marked,
-        count(*) FILTER (WHERE status = 'skipped')::int AS skipped
-      FROM synced_workouts
-    `.catch(() => [] as Array<{ total: number; week: number; marked: number; skipped: number }>),
-    sql`
-      SELECT hevy_id, title, synced_at, calories, avg_hr,
-             garmin_activity_id, COALESCE(status, 'success') AS status
-      FROM synced_workouts
-      ORDER BY synced_at DESC
-      LIMIT 10
-    `.catch(() => [] as RecentWorkout[]),
-    sql`
-      SELECT id, time, synced, skipped, failed, trigger
-      FROM sync_log
-      ORDER BY id DESC
-      LIMIT 10
-    `.catch(() => [] as SyncLogEntry[]),
-    sql`
-      SELECT value FROM app_cache WHERE key = 'auto_sync' LIMIT 1
-    `.catch(() => [] as Array<{ value: unknown }>),
-    sql`SELECT count(*)::int AS n FROM pending_uploads`.catch(() => [] as Array<{ n: number }>),
-    sql`
-      SELECT
-        count(*)::int AS total,
-        count(*) FILTER (
-          WHERE hevy_routine_id IN (SELECT DISTINCT hevy_routine_id FROM routine_schedules)
-        )::int AS scheduled
-      FROM synced_routines
-    `.catch(() => [] as Array<{ total: number; scheduled: number }>),
-  ]);
+  try {
+    // A missing table degrades to a sane default. Any other failure means the database did not
+    // answer, and the catch below says so rather than showing an empty account (#765).
+    const [hevyConn, garminConn, counts, recent, syncLog, autoSync, pendingRow, routinesRow] = await Promise.all([
+      loadHevyConnection(sql),
+      loadGarminConnection(sql),
+      sql`
+        SELECT
+          count(*) FILTER (WHERE COALESCE(status, 'success') = 'success')::int AS total,
+          count(*) FILTER (
+            WHERE COALESCE(status, 'success') = 'success'
+              AND synced_at >= (now() - interval '7 days')
+          )::int AS week,
+          count(*) FILTER (WHERE status = 'manual')::int AS marked,
+          count(*) FILTER (WHERE status = 'skipped')::int AS skipped
+        FROM synced_workouts
+      `.catch(ifNoTable([] as Array<{ total: number; week: number; marked: number; skipped: number }>)),
+      sql`
+        SELECT hevy_id, title, synced_at, calories, avg_hr,
+               garmin_activity_id, COALESCE(status, 'success') AS status
+        FROM synced_workouts
+        ORDER BY synced_at DESC
+        LIMIT 10
+      `.catch(ifNoTable([] as RecentWorkout[])),
+      sql`
+        SELECT id, time, synced, skipped, failed, trigger
+        FROM sync_log
+        ORDER BY id DESC
+        LIMIT 10
+      `.catch(ifNoTable([] as SyncLogEntry[])),
+      sql`
+        SELECT value FROM app_cache WHERE key = 'auto_sync' LIMIT 1
+      `.catch(ifNoTable([] as Array<{ value: unknown }>)),
+      sql`SELECT count(*)::int AS n FROM pending_uploads`.catch(ifNoTable([] as Array<{ n: number }>)),
+      sql`
+        SELECT
+          count(*)::int AS total,
+          count(*) FILTER (
+            WHERE hevy_routine_id IN (SELECT DISTINCT hevy_routine_id FROM routine_schedules)
+          )::int AS scheduled
+        FROM synced_routines
+      `.catch(ifNoTable([] as Array<{ total: number; scheduled: number }>)),
+    ]);
 
-  const autoSyncValue =
-    autoSync[0]?.value && typeof autoSync[0].value === "object"
-      ? (autoSync[0].value as Record<string, unknown>)
-      : {};
+    const autoSyncValue =
+      autoSync[0]?.value && typeof autoSync[0].value === "object"
+        ? (autoSync[0].value as Record<string, unknown>)
+        : {};
 
-  return {
-    dbConfigured: true,
-    // See lib/connections.ts for which row means what. The `recent` fallbacks keep a user who
-    // synced under an older build showing as connected even if their credential row is odd.
-    hevyConnected: hevyConn.connected || recent.length > 0,
-    garminConnected:
-      garminConn.connected || recent.some((r) => r.garmin_activity_id != null),
-    totalSynced: counts[0]?.total ?? 0,
-    syncedThisWeek: counts[0]?.week ?? 0,
-    markedSynced: counts[0]?.marked ?? 0,
-    skipped: counts[0]?.skipped ?? 0,
-    pending: pendingRow[0]?.n ?? 0,
-    routinesSynced: routinesRow[0]?.total ?? 0,
-    routinesScheduled: routinesRow[0]?.scheduled ?? 0,
-    recent: recent.map((r) => ({
-      hevy_id: r.hevy_id,
-      title: r.title ?? "",
-      synced_at: r.synced_at ?? null,
-      calories: Number(r.calories) || 0,
-      avg_hr: r.avg_hr != null ? Number(r.avg_hr) : null,
-      garmin_activity_id: r.garmin_activity_id ?? null,
-      status: r.status,
-    })),
-    syncLog: syncLog.map((r) => ({
-      id: Number(r.id),
-      time: r.time ?? null,
-      synced: Number(r.synced) || 0,
-      skipped: Number(r.skipped) || 0,
-      failed: Number(r.failed) || 0,
-      trigger: r.trigger ?? "manual",
-    })),
-    autoSyncEnabled: Boolean(autoSyncValue.enabled),
-    autoSyncInterval: Number(autoSyncValue.interval_minutes) || 120,
-  };
+    return {
+      dbConfigured: true,
+      // See lib/connections.ts for which row means what. The `recent` fallbacks keep a user who
+      // synced under an older build showing as connected even if their credential row is odd.
+      hevyConnected: hevyConn.connected || recent.length > 0,
+      garminConnected:
+        garminConn.connected || recent.some((r) => r.garmin_activity_id != null),
+      totalSynced: counts[0]?.total ?? 0,
+      syncedThisWeek: counts[0]?.week ?? 0,
+      markedSynced: counts[0]?.marked ?? 0,
+      skipped: counts[0]?.skipped ?? 0,
+      pending: pendingRow[0]?.n ?? 0,
+      routinesSynced: routinesRow[0]?.total ?? 0,
+      routinesScheduled: routinesRow[0]?.scheduled ?? 0,
+      recent: recent.map((r) => ({
+        hevy_id: r.hevy_id,
+        title: r.title ?? "",
+        synced_at: r.synced_at ?? null,
+        calories: Number(r.calories) || 0,
+        avg_hr: r.avg_hr != null ? Number(r.avg_hr) : null,
+        garmin_activity_id: r.garmin_activity_id ?? null,
+        status: r.status,
+      })),
+      syncLog: syncLog.map((r) => ({
+        id: Number(r.id),
+        time: r.time ?? null,
+        synced: Number(r.synced) || 0,
+        skipped: Number(r.skipped) || 0,
+        failed: Number(r.failed) || 0,
+        trigger: r.trigger ?? "manual",
+      })),
+      autoSyncEnabled: Boolean(autoSyncValue.enabled),
+      autoSyncInterval: Number(autoSyncValue.interval_minutes) || 120,
+    };
+  } catch (error) {
+    console.error("[loadDashboard] the database did not answer:", (error as Error)?.message ?? error);
+    return { ...EMPTY, dbConfigured: true, dbDown: true };
+  }
 }
 
 function fmtDate(value: string | null): string {
@@ -220,7 +239,9 @@ function StatusPill({ status }: { status: string }) {
 }
 
 export default async function DashboardPage() {
+  if (!demoMode()) await connection();
   const data = await loadDashboard();
+  if (data.dbDown) return <DatabaseDownPage title="Sync status" />;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 md:px-6">
@@ -230,6 +251,8 @@ export default async function DashboardPage() {
           Your Hevy workouts flowing into Garmin Connect.
         </p>
       </header>
+
+      <UpdateBanner />
 
       {!data.dbConfigured && (
         <div className="mb-6 rounded-lg border border-warm/40 bg-warm/10 p-4 text-sm text-warm">
@@ -293,11 +316,15 @@ export default async function DashboardPage() {
         <SyncLoop ready={data.hevyConnected && data.garminConnected} />
       </div>
       <div className="mt-3">
-        <BatchSync ready={data.hevyConnected && data.garminConnected} />
+        <BatchSync ready={data.hevyConnected && data.garminConnected} onServer={serverSyncSchedule() != null} />
       </div>
 
       <div className="mb-8">
-        <AutoSyncToggle enabled={data.autoSyncEnabled} interval={data.autoSyncInterval} />
+        {serverSyncSchedule() ? (
+          <ServerSchedule schedule={serverSyncSchedule() ?? ""} />
+        ) : (
+          <AutoSyncToggle enabled={data.autoSyncEnabled} interval={data.autoSyncInterval} />
+        )}
       </div>
 
       <PipelineDiagram mappingCount={Object.keys(HEVY_TO_GARMIN).length} />

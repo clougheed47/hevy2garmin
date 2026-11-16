@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { loadGarminConnection, loadHevyConnection } from "./connections";
 
 type Sql = Parameters<typeof loadGarminConnection>[0];
@@ -14,7 +14,14 @@ function fakeSql(rows: unknown[], sink?: string[]): Sql {
 
 function throwingSql(): Sql {
   return (async () => {
-    throw new Error("relation \"platform_credentials\" does not exist");
+    throw Object.assign(new Error("relation \"platform_credentials\" does not exist"), { code: "42P01" });
+  }) as unknown as Sql;
+}
+
+/** A database that does not answer at all, which must never read as "not connected" (#765). */
+function downSql(): Sql {
+  return (async () => {
+    throw Object.assign(new Error("Your account or project has exceeded the quota"), { code: "XX000" });
   }) as unknown as Sql;
 }
 
@@ -72,7 +79,7 @@ describe("loadGarminConnection (#495)", () => {
 describe("loadHevyConnection", () => {
   it("treats the status the setup form actually writes as connected", async () => {
     const r = await loadHevyConnection(
-      fakeSql([{ status: "active", connected_at: "2026-09-01T00:00:00Z" }]),
+      fakeSql([{ status: "active", connected_at: "2026-09-01T00:00:00Z", has_key: true }]),
     );
     expect(r).toEqual({ connected: true, connectedAt: "2026-09-01T00:00:00Z" });
   });
@@ -88,5 +95,37 @@ describe("loadHevyConnection", () => {
 
   it("degrades to disconnected when the table is missing", async () => {
     expect((await loadHevyConnection(throwingSql())).connected).toBe(false);
+  });
+
+  describe("a key from HEVY_API_KEY", () => {
+    const ENV = process.env.HEVY_API_KEY;
+    afterEach(() => {
+      if (ENV === undefined) delete process.env.HEVY_API_KEY;
+      else process.env.HEVY_API_KEY = ENV;
+    });
+
+    it("is connected without any row, as the sync uses it", async () => {
+      process.env.HEVY_API_KEY = "k";
+      expect(await loadHevyConnection(fakeSql([]))).toEqual({ connected: true, connectedAt: null });
+    });
+
+    it("is still disconnected once Hevy rejected it", async () => {
+      process.env.HEVY_API_KEY = "k";
+      const r = await loadHevyConnection(fakeSql([{ status: "disconnected", connected_at: null, has_key: false }]));
+      expect(r.connected).toBe(false);
+    });
+
+    it("a status-only row without the env key is not a connection", async () => {
+      delete process.env.HEVY_API_KEY;
+      const r = await loadHevyConnection(fakeSql([{ status: "active", connected_at: null, has_key: false }]));
+      expect(r.connected).toBe(false);
+    });
+  });
+});
+
+describe("a database that does not answer (#765)", () => {
+  it("is thrown rather than read as disconnected", async () => {
+    await expect(loadGarminConnection(downSql())).rejects.toThrow("exceeded the quota");
+    await expect(loadHevyConnection(downSql())).rejects.toThrow("exceeded the quota");
   });
 });

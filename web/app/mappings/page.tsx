@@ -1,5 +1,9 @@
 import { HEVY_TO_GARMIN } from "hevy2garmin";
+import { DatabaseDownPage } from "@/components/database-down";
+import { ifNoTable } from "@/lib/missing-table";
 import { getDb } from "@/lib/db";
+import { demoMode } from "@/lib/demo";
+import { demoMappings } from "@/lib/demo-data";
 import {
   CATEGORY_OPTIONS,
   categoryName,
@@ -8,8 +12,13 @@ import { DeleteMappingButton, MappingForm } from "@/components/mapping-form";
 import { MappingsTable } from "@/components/mappings-table";
 import { UnmappedCard } from "@/components/unmapped-card";
 
-// Queries the live hevy2garmin Postgres per request — never at build time.
-export const dynamic = "force-dynamic";
+import { connection } from "next/server";
+import { Suspense } from "react";
+
+// Self-hosted, this reads Postgres per request and renders dynamically. The public
+// demo has no database and serves fixed sample data, so it prerenders as a static
+// page. The connection() call in the component forces the dynamic render off the
+// demo; leaving it out in demo mode lets the page be prerendered at build.
 
 interface CustomMapping {
   hevy_name: string;
@@ -18,6 +27,8 @@ interface CustomMapping {
 }
 
 interface MappingsData {
+  /** The database did not answer, as opposed to answering with nothing (#765). */
+  dbDown?: boolean;
   dbConfigured: boolean;
   custom: CustomMapping[];
   builtin: Array<{ name: string; category: number; subcategory: number }>;
@@ -31,6 +42,8 @@ async function loadMappings(): Promise<MappingsData> {
     subcategory: pair[1],
   }));
 
+  if (demoMode()) return { dbConfigured: true, custom: demoMappings(), builtin };
+
   let sql: ReturnType<typeof getDb>;
   try {
     sql = getDb();
@@ -38,25 +51,32 @@ async function loadMappings(): Promise<MappingsData> {
     return { dbConfigured: false, custom: [], builtin };
   }
 
-  const rows = await sql`
-    SELECT hevy_name, category, subcategory
-    FROM custom_mappings
-    ORDER BY hevy_name ASC
-  `.catch(() => [] as CustomMapping[]);
+  try {
+    const rows = await sql`
+      SELECT hevy_name, category, subcategory
+      FROM custom_mappings
+      ORDER BY hevy_name ASC
+    `.catch(ifNoTable([] as CustomMapping[]));
 
-  return {
-    dbConfigured: true,
-    custom: rows.map((r) => ({
-      hevy_name: r.hevy_name,
-      category: Number(r.category),
-      subcategory: Number(r.subcategory),
-    })),
-    builtin,
-  };
+    return {
+      dbConfigured: true,
+      custom: rows.map((r) => ({
+        hevy_name: r.hevy_name,
+        category: Number(r.category),
+        subcategory: Number(r.subcategory),
+      })),
+      builtin,
+    };
+  } catch (error) {
+    console.error("[loadMappings] the database did not answer:", (error as Error)?.message ?? error);
+    return { dbConfigured: true, dbDown: true, custom: [], builtin };
+  }
 }
 
 export default async function MappingsPage() {
+  if (!demoMode()) await connection();
   const data = await loadMappings();
+  if (data.dbDown) return <DatabaseDownPage title="Exercise mappings" />;
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 md:px-6">
@@ -85,7 +105,9 @@ export default async function MappingsPage() {
           Add a custom mapping
         </h2>
         <div className="rounded-xl border border-border bg-surface-elevated p-4">
-          <MappingForm categories={CATEGORY_OPTIONS} />
+          <Suspense fallback={null}>
+            <MappingForm categories={CATEGORY_OPTIONS} />
+          </Suspense>
           <p className="mt-3 text-xs text-text-muted">
             A custom mapping overrides the built-in map for that exact Hevy
             exercise name. Sub ID 0 uses the category&apos;s generic exercise.

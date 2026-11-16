@@ -1,11 +1,20 @@
 import { getDb } from "@/lib/db";
+import { demoMode } from "@/lib/demo";
+import { demoSettings } from "@/lib/demo-data";
+import { DatabaseDownPage } from "@/components/database-down";
+import { ifNoTable } from "@/lib/missing-table";
 import { SettingsForm } from "@/components/settings-form";
 import { DangerZone } from "@/components/danger-zone";
 import { SessionsCard } from "@/components/sessions-card";
 import { ScanDuplicates } from "@/components/scan-duplicates";
+import { serverSyncSchedule } from "@/lib/server-schedule";
 
-// Queries the live hevy2garmin Postgres per request — never at build time.
-export const dynamic = "force-dynamic";
+import { connection } from "next/server";
+
+// Self-hosted, this reads Postgres per request and renders dynamically. The public
+// demo has no database and serves fixed sample data, so it prerenders as a static
+// page. The connection() call in the component forces the dynamic render off the
+// demo; leaving it out in demo mode lets the page be prerendered at build.
 
 interface PlatformRow {
   platform: string;
@@ -22,6 +31,8 @@ interface ConfigEntry {
 }
 
 interface SettingsData {
+  /** The database did not answer, as opposed to answering with nothing (#765). */
+  dbDown?: boolean;
   dbConfigured: boolean;
   platforms: PlatformRow[];
   config: ConfigEntry[];
@@ -34,6 +45,7 @@ const EMPTY: SettingsData = { dbConfigured: false, platforms: [], config: [], sy
 const CONFIG_KEYS = ["user_profile", "timing", "hr_fusion", "merge_settings", "auto_sync", "sync_window"];
 
 async function loadSettings(): Promise<SettingsData> {
+  if (demoMode()) return demoSettings();
   let sql: ReturnType<typeof getDb>;
   try {
     sql = getDb();
@@ -41,43 +53,46 @@ async function loadSettings(): Promise<SettingsData> {
     return EMPTY;
   }
 
-  const [platforms, config, counts] = await Promise.all([
-    sql`
-      SELECT platform, auth_type, status, connected_at, expires_at
-      FROM platform_credentials
-      ORDER BY platform ASC
-    `.catch(() => [] as PlatformRow[]),
-    sql`
-      SELECT key, value, updated_at
-      FROM app_cache
-      WHERE key = ANY(${CONFIG_KEYS})
-      ORDER BY key ASC
-    `.catch(() => [] as ConfigEntry[]),
-    sql`SELECT count(*)::int AS n FROM synced_workouts`.catch(
-      () => [] as Array<{ n: number }>,
-    ),
-  ]);
+  try {
+    const [platforms, config, counts] = await Promise.all([
+      sql`
+        SELECT platform, auth_type, status, connected_at, expires_at
+        FROM platform_credentials
+        ORDER BY platform ASC
+      `.catch(ifNoTable([] as PlatformRow[])),
+      sql`
+        SELECT key, value, updated_at
+        FROM app_cache
+        WHERE key = ANY(${CONFIG_KEYS})
+        ORDER BY key ASC
+      `.catch(ifNoTable([] as ConfigEntry[])),
+      sql`SELECT count(*)::int AS n FROM synced_workouts`.catch(ifNoTable([] as Array<{ n: number }>)),
+    ]);
 
-  return {
-    dbConfigured: true,
-    syncedCount: Number(counts[0]?.n ?? 0),
-    platforms: platforms.map((p) => ({
-      platform: p.platform,
-      auth_type: p.auth_type ?? "",
-      status: p.status ?? "disconnected",
-      connected_at: p.connected_at ?? null,
-      expires_at: p.expires_at ?? null,
-    })),
-    config: config.map((c) => ({
-      key: c.key,
-      // The postgres driver returns JSONB as a parsed object already.
-      value:
-        c.value && typeof c.value === "object"
-          ? (c.value as Record<string, unknown>)
-          : {},
-      updated_at: c.updated_at ?? null,
-    })),
-  };
+    return {
+      dbConfigured: true,
+      syncedCount: Number(counts[0]?.n ?? 0),
+      platforms: platforms.map((p) => ({
+        platform: p.platform,
+        auth_type: p.auth_type ?? "",
+        status: p.status ?? "disconnected",
+        connected_at: p.connected_at ?? null,
+        expires_at: p.expires_at ?? null,
+      })),
+      config: config.map((c) => ({
+        key: c.key,
+        // The postgres driver returns JSONB as a parsed object already.
+        value:
+          c.value && typeof c.value === "object"
+            ? (c.value as Record<string, unknown>)
+            : {},
+        updated_at: c.updated_at ?? null,
+      })),
+    };
+  } catch (error) {
+    console.error("[loadSettings] the database did not answer:", (error as Error)?.message ?? error);
+    return { ...EMPTY, dbConfigured: true, dbDown: true };
+  }
 }
 
 function fmtDate(value: string | null): string {
@@ -122,7 +137,9 @@ function StatusPill({ status }: { status: string }) {
 }
 
 export default async function SettingsPage() {
+  if (!demoMode()) await connection();
   const data = await loadSettings();
+  if (data.dbDown) return <DatabaseDownPage title="Settings" />;
   const cfg = (key: string): Record<string, unknown> =>
     data.config.find((c) => c.key === key)?.value ?? {};
   const autoSync = cfg("auto_sync");
@@ -201,6 +218,7 @@ export default async function SettingsPage() {
         <h2 className="mb-3 text-lg font-semibold text-text">Configuration</h2>
         <SettingsForm
           githubTokenSet={data.platforms.some((r) => r.platform === "github" && r.status === "active")}
+          serverSchedule={serverSyncSchedule()}
           autoSyncEnabled={Boolean(autoSync.enabled)}
           autoSyncInterval={Number(autoSync.interval_minutes) || 120}
           hrFusionEnabled={hrFusion.enabled == null ? true : Boolean(hrFusion.enabled)}
